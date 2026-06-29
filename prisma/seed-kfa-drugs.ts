@@ -1,0 +1,288 @@
+/**
+ * Seed local Master Farmalkes prices from sample-data/master-data-docs/daftar-kfa-master-obat.json.
+ *
+ * This uses the MedicalItemPriceMaster table as the local Master Farmalkes reference data.
+ * Seeded rows are tagged with `master_data` in sources and given a long expiry.
+ *
+ * Run:
+ *   npx tsx prisma/seed-kfa-drugs.ts
+ */
+
+import { PrismaPg } from '@prisma/adapter-pg';
+import { PrismaClient } from '../src/generated/prisma/client';
+import type { Prisma } from '../src/generated/prisma/client';
+import * as dotenv from 'dotenv';
+import * as fs from 'fs';
+import * as path from 'path';
+
+dotenv.config({ path: path.join(__dirname, '../.env') });
+
+const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL! });
+const prisma = new PrismaClient({ adapter });
+
+const DEFAULT_JSON_PATH = path.join(__dirname, '../sample-data/master-data-docs/daftar-kfa-master-obat.json');
+const SOURCE_TAG = 'master_data';
+const CHUNK_SIZE = 1000;
+const MASTER_DATA_TTL_YEARS = 10;
+
+type MasterFarmalkesRow = Record<string, unknown>;
+
+function parseJsonObject(value: unknown): Record<string, unknown> | null {
+  if (!value) return null;
+  if (typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>;
+  if (typeof value !== 'string') return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseJsonArray(value: unknown): Array<Record<string, unknown>> {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.filter((item): item is Record<string, unknown> => item && typeof item === 'object' && !Array.isArray(item));
+  if (typeof value !== 'string') return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is Record<string, unknown> => item && typeof item === 'object' && !Array.isArray(item))
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function cleanString(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  const text = String(value).trim();
+  if (!text || text.toLowerCase() === 'null') return null;
+  return text;
+}
+
+function numberValue(value: unknown): number | null {
+  if (value === undefined || value === null || value === '') return null;
+  const number = Number(String(value).replace(/[^0-9.,-]/g, '').replace(/,/g, '.'));
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function resolveValidationPrice(fixPrice: number | null, hetPrice: number | null, maxReferencePrice: number | null): number | null {
+  const candidates = [maxReferencePrice, hetPrice, fixPrice].filter((price): price is number => typeof price === 'number' && price >= 100);
+  if (candidates.length === 0) return null;
+
+  // Some source rows have nominal fix_price (e.g. 1.0) while HET/max reference is valid.
+  // Use the highest meaningful reference as validation ceiling to avoid false overcharge flags.
+  return Math.max(...candidates);
+}
+
+function resolveAverageReferencePrice(fixPrice: number | null, hetPrice: number | null, maxReferencePrice: number | null): number | null {
+  if (fixPrice && fixPrice >= 100) return fixPrice;
+  return hetPrice || maxReferencePrice || null;
+}
+
+function normalizeName(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+function getFarmalkesType(row: MasterFarmalkesRow) {
+  return parseJsonObject(row.farmalkes_type);
+}
+
+function getItemType(row: MasterFarmalkesRow) {
+  const farmalkesType = getFarmalkesType(row);
+  return {
+    code: cleanString(farmalkesType?.code)?.toLowerCase() || null,
+    name: cleanString(farmalkesType?.name) || null,
+    group: cleanString(farmalkesType?.group)?.toLowerCase() || null,
+  };
+}
+
+function cleanGenericName(value: unknown): string | null {
+  const text = cleanString(value);
+  if (!text || text === '0' || text === '1') return null;
+  return text;
+}
+
+function getGenericName(row: MasterFarmalkesRow): string | null {
+  const normalizedGeneric = cleanGenericName(row.generic_name);
+  if (normalizedGeneric) return normalizedGeneric;
+
+  const explicitGeneric = cleanGenericName(row.generik);
+  if (explicitGeneric) return explicitGeneric;
+
+  const ingredients = parseJsonArray(row.active_ingredients)
+    .map((ingredient) => cleanString(ingredient.zat_aktif) || cleanString(ingredient.name))
+    .filter((value): value is string => Boolean(value));
+
+  if (ingredients.length > 0) return Array.from(new Set(ingredients)).join(', ');
+
+  const template = parseJsonObject(row.product_template);
+  return cleanString(template?.display_name) || cleanString(template?.name);
+}
+
+function getDosageForm(row: MasterFarmalkesRow): string | null {
+  const dosageForm = parseJsonObject(row.dosage_form);
+  return cleanString(dosageForm?.name) || cleanString(dosageForm?.code);
+}
+
+function buildSource(row: MasterFarmalkesRow, marketPriceMax: number): string {
+  const parts = [
+    SOURCE_TAG,
+    `kfa_code:${cleanString(row.kfa_code) || '-'}`,
+    `id:${cleanString(row.id) || '-'}`,
+    `display_name:${cleanString(row.name) || '-'}`,
+    `brand_name:${cleanString(row.nama_dagang) || '-'}`,
+    `generic_name:${getGenericName(row) || '-'}`,
+    `item_type_code:${getItemType(row).code || '-'}`,
+    `item_type_name:${getItemType(row).name || '-'}`,
+    `item_group:${getItemType(row).group || '-'}`,
+    `nie:${cleanString(row.nie) || '-'}`,
+    `manufacturer:${cleanString(row.manufacturer) || '-'}`,
+    `registrar:${cleanString(row.registrar) || '-'}`,
+    `dosage_form:${getDosageForm(row) || '-'}`,
+    `dose_per_unit:${cleanString(row.dose_per_unit) || '-'}`,
+    `unit:${cleanString(row.satuan) || cleanString(row.uom_name) || '-'}`,
+    `het_price:${numberValue(row.het_price) || 0}`,
+    `fix_price:${numberValue(row.fix_price) || 0}`,
+    `per_unit_IDR:${marketPriceMax}`,
+  ];
+  return parts.join(' | ');
+}
+
+function getItemDisplayName(row: MasterFarmalkesRow): string | null {
+  return cleanString(row.nama_dagang) || cleanString(row.name);
+}
+
+function toMedicalItemMasterCreate(row: MasterFarmalkesRow, now: Date, expiresAt: Date): Prisma.MedicalItemPriceMasterCreateManyInput | null {
+  if (row.active === false || cleanString(row.active) === '0') return null;
+
+  const itemName = getItemDisplayName(row);
+  if (!itemName) return null;
+
+  const itemType = getItemType(row);
+
+  const hetPrice = numberValue(row.het_price);
+  const fixPrice = numberValue(row.fix_price);
+  const maxReferencePrice = numberValue(row.max_reference_price);
+  const marketPriceMax = resolveValidationPrice(fixPrice, hetPrice, maxReferencePrice);
+  if (!marketPriceMax) return null;
+
+  return {
+    itemName: normalizeName(itemName),
+    itemGenericName: getGenericName(row),
+    itemTypeCode: itemType.code,
+    itemTypeName: itemType.name,
+    itemGroup: itemType.group,
+    marketPriceMax,
+    marketPriceAvg: resolveAverageReferencePrice(fixPrice, hetPrice, maxReferencePrice),
+    fixPrice,
+    hetPrice,
+    maxReferencePrice: maxReferencePrice || marketPriceMax,
+    sources: [buildSource(row, marketPriceMax)],
+    currency: 'IDR',
+    fetchedAt: now,
+    expiresAt,
+  };
+}
+
+function maxMeaningfulPrice(...prices: Array<number | null | undefined>): number | null {
+  const values = prices.filter((price): price is number => typeof price === 'number' && Number.isFinite(price) && price >= 100);
+  return values.length > 0 ? Math.max(...values) : null;
+}
+
+function mergeNullableText(existing: string | null | undefined, incoming: string | null | undefined, limit = 5): string | null {
+  const values = new Set(
+    String(existing || '')
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean),
+  );
+  if (incoming) values.add(incoming.trim());
+  return Array.from(values).slice(0, limit).join(', ') || null;
+}
+
+function aggregateByItemName(entries: Prisma.MedicalItemPriceMasterCreateManyInput[]) {
+  const map = new Map<string, Prisma.MedicalItemPriceMasterCreateManyInput>();
+
+  for (const entry of entries) {
+    const key = String(entry.itemName || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    if (!key) continue;
+
+    const existing = map.get(key);
+    if (!existing) {
+      map.set(key, { ...entry, sources: Array.isArray(entry.sources) ? entry.sources : [] });
+      continue;
+    }
+
+    const existingSources = Array.isArray(existing.sources) ? existing.sources.map(String) : [];
+    const incomingSources = Array.isArray(entry.sources) ? entry.sources.map(String) : [];
+    const sources = Array.from(new Set([...existingSources, ...incomingSources]));
+
+    const marketPriceMax = Math.max(Number(existing.marketPriceMax || 0), Number(entry.marketPriceMax || 0));
+    const maxReferencePrice = maxMeaningfulPrice(
+      existing.maxReferencePrice as number | null,
+      entry.maxReferencePrice as number | null,
+      existing.marketPriceMax as number | null,
+      entry.marketPriceMax as number | null,
+    );
+    const hetPrice = maxMeaningfulPrice(existing.hetPrice as number | null, entry.hetPrice as number | null);
+    const fixPrice = maxMeaningfulPrice(existing.fixPrice as number | null, entry.fixPrice as number | null);
+    const marketPriceAvg = maxMeaningfulPrice(existing.marketPriceAvg as number | null, entry.marketPriceAvg as number | null);
+
+    map.set(key, {
+      ...existing,
+      itemGenericName: mergeNullableText(existing.itemGenericName as string | null, entry.itemGenericName as string | null),
+      itemTypeCode: existing.itemTypeCode || entry.itemTypeCode,
+      itemTypeName: existing.itemTypeName || entry.itemTypeName,
+      itemGroup: existing.itemGroup || entry.itemGroup,
+      marketPriceMax,
+      marketPriceAvg,
+      fixPrice,
+      hetPrice,
+      maxReferencePrice: maxReferencePrice || marketPriceMax,
+      sources,
+    });
+  }
+
+  return Array.from(map.values());
+}
+
+async function main() {
+  const jsonPath = process.argv[2] ? path.resolve(process.argv[2]) : DEFAULT_JSON_PATH;
+  console.log(`[seed-kfa-drugs] Reading ${jsonPath}`);
+
+  const payload = JSON.parse(fs.readFileSync(jsonPath, 'utf8')) as { products?: MasterFarmalkesRow[] };
+  const rows = Array.isArray(payload.products) ? payload.products : [];
+  if (rows.length === 0) throw new Error('JSON file does not contain a non-empty products array.');
+  const now = new Date();
+  const expiresAt = new Date(now);
+  expiresAt.setFullYear(expiresAt.getFullYear() + MASTER_DATA_TTL_YEARS);
+
+  const pricedEntries = rows
+    .map((row) => toMedicalItemMasterCreate(row, now, expiresAt))
+    .filter((entry): entry is Prisma.MedicalItemPriceMasterCreateManyInput => Boolean(entry));
+  const entries = aggregateByItemName(pricedEntries);
+
+  console.log(`[seed-kfa-drugs] Parsed ${rows.length} rows; ${pricedEntries.length} priced source rows aggregated into ${entries.length} unique master item names.`);
+
+  await prisma.$executeRawUnsafe('TRUNCATE TABLE "snp_medical_item_price_master" RESTART IDENTITY');
+
+  let created = 0;
+  for (let i = 0; i < entries.length; i += CHUNK_SIZE) {
+    const chunk = entries.slice(i, i + CHUNK_SIZE);
+    const result = await prisma.medicalItemPriceMaster.createMany({ data: chunk });
+    created += result.count;
+    console.log(`[seed-kfa-drugs] Inserted ${created}/${entries.length}`);
+  }
+
+  console.log(`[seed-kfa-drugs] Done. Inserted ${created} master medical item rows.`);
+}
+
+main()
+  .catch((error) => {
+    console.error('[seed-kfa-drugs] Failed:', error);
+    process.exitCode = 1;
+  })
+  .finally(async () => {
+    await prisma.$disconnect();
+  });

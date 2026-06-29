@@ -1,0 +1,128 @@
+"use server";
+
+import prisma from "@/lib/db";
+import { getAuthenticatedUser, getCurrentUserPermission, hasPermission, isSuperAdminRole } from "@/lib/rbac";
+import { revalidatePath } from "next/cache";
+
+function formLimit(formData: FormData, key: string, fallback: number) {
+  const value = Number(formData.get(key));
+  if (!Number.isFinite(value) || value < 0) return fallback;
+  return Math.floor(value);
+}
+
+function formNumber(formData: FormData, key: string, fallback: number) {
+  const value = Number(formData.get(key));
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+export async function updateSystemConfig(formData: FormData) {
+  if (!(await getCurrentUserPermission("AI_ENGINE_CONFIG"))) {
+    return { success: false, error: "Anda tidak memiliki akses untuk mengubah konfigurasi AI." };
+  }
+
+  try {
+    const aiProvider = formData.get("primaryProvider") as string;
+    const aiGatewayUrl = formData.get("gatewayUrl") as string;
+    const aiModel = formData.get("aiModel") as string;
+    const aiMaxTokens = parseInt(formData.get("maxTokens") as string, 10);
+    const aiTemperature = parseFloat(formData.get("temperature") as string);
+    
+    // Thresholds
+    const thresholdObatPct = parseFloat(formData.get("thresholdObatPct") as string);
+    const thresholdTindakanPct = parseFloat(formData.get("thresholdTindakanPct") as string);
+    const thresholdLosDays = parseInt(formData.get("thresholdLosDays") as string, 10);
+
+    const updateData = {
+      aiProvider: aiProvider || "vercel-ai-gateway",
+      aiGatewayUrl: aiGatewayUrl || "",
+      aiModel: aiModel || "gpt-4o-mini",
+      aiMaxTokens: isNaN(aiMaxTokens) ? 1500 : aiMaxTokens,
+      aiTemperature: isNaN(aiTemperature) ? 0.7 : aiTemperature,
+      thresholdObatPct: isNaN(thresholdObatPct) ? 10.0 : thresholdObatPct,
+      thresholdTindakanPct: isNaN(thresholdTindakanPct) ? 10.0 : thresholdTindakanPct,
+      thresholdLosDays: isNaN(thresholdLosDays) ? 1 : thresholdLosDays,
+    };
+
+    await prisma.systemConfig.upsert({
+      where: { id: "GLOBAL_CONFIG" },
+      update: updateData,
+      create: {
+        id: "GLOBAL_CONFIG",
+        ...updateData
+      }
+    });
+
+    revalidatePath("/dashboard/settings");
+    return { success: true };
+  } catch (error) {
+    console.error("Failed to update system config:", error);
+    return { success: false, error: "Failed to update configuration" };
+  }
+}
+
+export async function updateThresholdConfig(formData: FormData) {
+  if (!(await getCurrentUserPermission("CLINICAL_THRESHOLDS"))) {
+    return { success: false, error: "Anda tidak memiliki akses untuk mengubah threshold Audit Klaim." };
+  }
+
+  try {
+    const globalData = {
+      thresholdObatPct: formNumber(formData, "thresholdObatPct", 10.0),
+      thresholdTindakanPct: formNumber(formData, "thresholdTindakanPct", 10.0),
+      thresholdLosDays: formLimit(formData, "thresholdLosDays", 1),
+    };
+
+    await prisma.systemConfig.upsert({
+      where: { id: "GLOBAL_CONFIG" },
+      update: globalData,
+      create: {
+        id: "GLOBAL_CONFIG",
+        ...globalData,
+      },
+    });
+
+    revalidatePath("/dashboard/settings/threshold");
+    return { success: true };
+  } catch (error) {
+    console.error("Failed to update threshold config:", error);
+    return { success: false, error: "Gagal menyimpan threshold Audit Klaim." };
+  }
+}
+
+export async function updatePrivacyConfig(redactPatterns: string[], safeContexts: string[]) {
+  const user = await getAuthenticatedUser();
+  if (!user || (!hasPermission(user.role, "AI_ENGINE_CONFIG") && !hasPermission(user.role, "PRIVACY_CONFIG"))) {
+    return { success: false, error: "Anda tidak memiliki akses untuk mengubah konfigurasi privasi." };
+  }
+
+  try {
+    const data = {
+      piiRedactPatterns: redactPatterns,
+      piiSafeContexts: safeContexts,
+    };
+
+    if (isSuperAdminRole(user.role)) {
+      await prisma.systemConfig.upsert({
+        where: { id: "GLOBAL_CONFIG" },
+        update: data,
+        create: {
+          id: "GLOBAL_CONFIG",
+          ...data,
+        },
+      });
+    } else {
+      if (!user.clientId) return { success: false, error: "User belum terhubung ke client." };
+      await prisma.client.update({
+        where: { id: user.clientId },
+        data,
+      });
+    }
+
+    revalidatePath("/dashboard/settings/privacy-config");
+    return { success: true };
+  } catch (error) {
+    console.error("Failed to update privacy config:", error);
+    return { success: false, error: "Gagal menyimpan konfigurasi privasi & PII." };
+  }
+}
+

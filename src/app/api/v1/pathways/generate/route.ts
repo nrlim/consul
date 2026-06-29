@@ -1,0 +1,77 @@
+import { NextResponse } from "next/server";
+import { authenticateApiRequest } from "@/lib/middleware/auth-api";
+import { recordApiUsage } from "@/lib/api-key";
+import prisma from "@/lib/db";
+import { generateClinicalPathway } from "@/lib/ai/generators/pathway";
+import { sanitizeClaimValidationInput } from "@/lib/ai/sanitizer";
+
+export async function POST(request: Request) {
+  const startTime = Date.now();
+  const auth = await authenticateApiRequest(request);
+  if (!auth.authenticated) return auth.response;
+
+  try {
+    const payload = await request.json();
+    payload.clientId = payload.clientId || auth.clientId || null;
+    payload.providerId = payload.providerId || null;
+
+    const claimJob = await prisma.claimJob.create({
+      data: {
+        jobType: "PATHWAY_GEN",
+        status: "QUEUED",
+        inputPayload: sanitizeClaimValidationInput(payload) as any,
+        clientId: payload.clientId,
+        providerId: payload.providerId,
+      }
+    });
+
+    // Run synchronously in background
+    setTimeout(async () => {
+      try {
+        await prisma.claimJob.update({ where: { id: claimJob.id }, data: { status: "PROCESSING", startedAt: new Date() } });
+        
+        const result = await generateClinicalPathway(payload, claimJob.id);
+
+        if (!result) {
+          await prisma.claimJob.update({
+            where: { id: claimJob.id },
+            data: { status: "FAILED", errorMessage: "AI pathway generation failed. Check server logs for the underlying cause." }
+          });
+          return;
+        }
+
+        await prisma.claimJob.update({
+          where: { id: claimJob.id },
+          data: { status: "COMPLETED", outputResult: result as any, completedAt: new Date() }
+        });
+      } catch (err) {
+        console.error("Local background workflow error:", err);
+        await prisma.claimJob.update({ where: { id: claimJob.id }, data: { status: "FAILED" } });
+      }
+    }, 1000);
+
+    if (auth.apiKeyId) {
+      await recordApiUsage({
+        apiKeyId: auth.apiKeyId,
+        clientId: payload.clientId,
+        providerId: payload.providerId,
+        jobId: claimJob.id,
+        endpoint: "/api/v1/pathways/generate",
+        method: "POST",
+        statusCode: 202,
+        durationMs: Date.now() - startTime
+      });
+    }
+
+    return NextResponse.json({
+      success: true,
+      jobId: claimJob.id,
+      message: "Pathway generation job has been queued locally.",
+      statusUrl: `/api/v1/jobs/${claimJob.id}/status`
+    }, { status: 202 });
+
+  } catch (error) {
+    console.error('[pathways/generate]', { message: error instanceof Error ? error.message : 'Unknown' });
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+  }
+}

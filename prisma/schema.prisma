@@ -1,0 +1,432 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider     = "postgresql"
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  ADMIN
+  CLIENT_ADMIN
+  CLIENT_USER
+  VIEWER
+}
+
+model User {
+  id        String    @id @default(uuid())
+  email     String    @unique
+  name      String?
+  password  String
+  role      UserRole  @default(VIEWER)
+  clientId  String?
+  client    Client?   @relation(fields: [clientId], references: [id])
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  claimReviewDecisions ClaimReviewDecision[]
+
+  @@index([clientId])
+  @@index([role])
+  @@map("snp_user")
+}
+
+// === AUTHENTICATION & API KEYS ===
+
+model ApiKey {
+  id         String   @id @default(uuid())
+  keyHash    String   @unique // Hashed public API key
+  secretHash String?  // Hashed API secret for external clients
+  keyCipher  String?  // Encrypted API key for controlled dashboard copy
+  secretCipher String? // Encrypted API secret for controlled dashboard copy
+  name       String   // E.g., "Production API Key"
+  clientId   String?
+  client     Client?  @relation(fields: [clientId], references: [id])
+  isActive   Boolean  @default(true)
+  expiresAt  DateTime?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  
+  usageLogs  ApiUsageLog[]
+
+  @@index([clientId])
+  @@map("snp_api_key")
+}
+
+model ApiUsageLog {
+  id           String    @id @default(uuid())
+  apiKeyId     String?
+  apiKey       ApiKey?   @relation(fields: [apiKeyId], references: [id])
+  clientId     String?
+  client       Client?   @relation(fields: [clientId], references: [id])
+  providerId   String?
+  provider     Provider? @relation(fields: [providerId], references: [id])
+  jobId        String?
+  endpoint     String    // "/api/v1/claims/validate" or "AI:validateDiagnosisTreatment"
+  method       String
+  statusCode   Int
+  requestType  String    @default("API") // "API" | "AI"
+  aiProvider   String?
+  aiModel      String?
+  inputTokens  Int       @default(0) // LLM tokens used (if applicable)
+  outputTokens Int       @default(0) // LLM tokens used (if applicable)
+  totalTokens  Int       @default(0)
+  durationMs   Int       // Response time
+  createdAt    DateTime  @default(now())
+
+  @@index([apiKeyId])
+  @@index([clientId])
+  @@index([providerId])
+  @@index([jobId])
+  @@index([requestType, createdAt])
+  @@index([createdAt])
+  @@map("snp_api_usage_log")
+}
+
+// === CLIENT, PROVIDER & CONFIGURATION ===
+
+model Client {
+  id                String   @id @default(uuid())
+  code              String   @unique // Stable client code, e.g., "CLIENT_ALPHA"
+  name              String
+  isActive          Boolean  @default(true)
+  aiProvider        String?  // override: "vercel-ai-gateway" | "sumopod" | "custom"
+  aiGatewayUrl      String?
+  aiModel           String?
+  aiMaxTokens       Int?
+  aiTemperature     Float?
+  creditBalance     Float    @default(0)
+  requestBalance    Int      @default(0)
+  piiRedactPatterns String[] @default(["name", "nama", "pasien", "patient", "fullname", "nik", "id", "ktp", "ssn", "identifier", "address", "alamat", "phone", "telepon", "nohp", "mobile", "email", "dob", "dateofbirth", "tanggallahir", "asuransi", "insurance", "bpjs"])
+  piiSafeContexts   String[] @default(["diagnosis", "procedure", "medication", "drug", "facility", "hospital", "clinic", "encounter", "class", "code", "type"])
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  users             User[]
+  apiKeys           ApiKey[]
+  apiUsageLogs      ApiUsageLog[]
+  providers         Provider[]
+  claimJobs         ClaimJob[]
+  creditLedgers     CreditLedger[]
+  requestLedgers    RequestLedger[]
+  policyRules       PolicyRule[]
+  claimReviewDecisions ClaimReviewDecision[]
+  ocrJobs           OcrJob[]
+
+  @@map("snp_client")
+}
+
+model CreditLedger {
+  id              String   @id @default(uuid())
+  clientId        String
+  client          Client   @relation(fields: [clientId], references: [id])
+  amount          Float    // Positive for top-up, negative for usage debit
+  balanceAfter    Float
+  type            String   // "TOPUP" | "USAGE" | "ADJUSTMENT"
+  description     String?
+  jobId           String?
+  createdByUserId String?
+  createdAt       DateTime @default(now())
+
+  @@index([clientId, createdAt])
+  @@index([jobId])
+  @@map("snp_credit_ledger")
+}
+
+model RequestLedger {
+  id              String   @id @default(uuid())
+  clientId        String
+  client          Client   @relation(fields: [clientId], references: [id])
+  amount          Int      // Positive for top-up, negative for per-request usage debit
+  balanceAfter    Int
+  type            String   // "TOPUP" | "USAGE" | "ADJUSTMENT"
+  description     String?
+  jobId           String?
+  createdByUserId String?
+  createdAt       DateTime @default(now())
+
+  @@index([clientId, createdAt])
+  @@index([jobId])
+  @@map("snp_request_ledger")
+}
+
+model Provider {
+  id               String   @id @default(uuid())
+  clientId         String?
+  client           Client?  @relation(fields: [clientId], references: [id])
+  code             String   // Stable provider/payer code, e.g., "PAYER_PRIMARY"
+  name             String
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  apiUsageLogs      ApiUsageLog[]
+  tariffBook        TariffEntry[]
+  claimJobs         ClaimJob[]
+  ocrJobs           OcrJob[]
+
+  @@index([clientId])
+  @@unique([clientId, code])
+  @@map("snp_provider")
+}
+
+// === POLICY & BENEFIT RULES ===
+
+model PolicyRule {
+  id                String   @id @default(uuid())
+  clientId          String?
+  client            Client?  @relation(fields: [clientId], references: [id])
+  policyProductCode String?
+  ruleCode          String
+  ruleName          String
+  ruleType          String   // "EXCLUSION" | "LIMIT" | "DEDUCTIBLE" | "COPAY" | "WAITING_PERIOD" | "PRE_AUTH" | "ROOM_ENTITLEMENT"
+  targetType        String?  // "DIAGNOSIS" | "MEDICATION_NAME" | "MEDICATION_TYPE" | "PROCEDURE" | "TOTAL_CLAIM" | "ROOM_CLASS"
+  targetCode        String?
+  targetPattern     String?
+  conditionJson     Json?
+  actionJson        Json?
+  severity          String   @default("WARNING") // "INFO" | "WARNING" | "REVIEW_NEEDED" | "REJECT_RECOMMENDED"
+  recommendation    String?
+  effectiveFrom     DateTime @default(now())
+  effectiveTo       DateTime?
+  status            String   @default("ACTIVE") // "DRAFT" | "ACTIVE" | "ARCHIVED"
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([clientId, status])
+  @@index([policyProductCode])
+  @@index([ruleType, targetType])
+  @@index([targetCode])
+  @@unique([clientId, ruleCode])
+  @@map("snp_policy_rule")
+}
+
+// === MASTER DATA: TARIFF BOOK ===
+
+model TariffEntry {
+  id            String   @id @default(uuid())
+  providerId    String
+  provider      Provider @relation(fields: [providerId], references: [id])
+  procedureCode String   // Procedure/service code from master fee schedule or source system
+  procedureName String
+  category      String   // General service category from client/provider master data
+  subcategory   String?  // Optional sub-grouping from source master data
+  serviceCode   String?  // Optional source-system service code
+  unit          String?  // Unit of tariff: "per_hari" | "per_kunjungan" | "per_tindakan" | "per_paket"
+  regionCode    String?  // e.g., "JKT", "SBY" — regional pricing
+  basePrice     Float    // Minimum / lowest price across all tiers
+  maxPrice      Float    // Maximum / highest price across all tiers
+  priceTiersJson Json?   // Optional structured pricing tiers/classes from source master data
+  currency      String   @default("IDR")
+  notes         String?  // Additional notes or conditions for this tariff
+  effectiveFrom DateTime
+  effectiveTo   DateTime?
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([procedureCode, providerId])
+  @@index([category, providerId])
+  @@index([serviceCode])
+  @@map("snp_tariff_entry")
+}
+
+// === MASTER DATA: DIAGNOSIS CATALOG ===
+
+model DiagnosisCode {
+  id            String   @id @default(uuid())
+  icdCode       String   @unique  // Diagnosis code, e.g., ICD-10 "J18.9"
+  description   String            // e.g., "Pneumonia, unspecified organism"
+  descriptionId String?           // Optional localized or alternate description
+  category      String            // Diagnosis category/chapter/group
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+
+  allowedProcedures DiagnosisProcedureMap[]
+
+  @@map("snp_diagnosis_code")
+}
+
+model DiagnosisProcedureMap {
+  id              String        @id @default(uuid())
+  diagnosisId     String
+  diagnosis       DiagnosisCode @relation(fields: [diagnosisId], references: [id])
+  procedureCode   String        // Procedure/service code
+  procedureName   String
+  isRequired      Boolean       @default(false)  // Mandatory for this diagnosis?
+  confidence      Float         @default(1.0)     // AI confidence mapping
+  source          String        @default("MANUAL") // "MANUAL" | "AI_GENERATED"
+  createdAt       DateTime      @default(now())
+
+  @@index([diagnosisId])
+  @@index([procedureCode])
+  @@map("snp_diagnosis_procedure_map")
+}
+
+// === JOB TRACKING ===
+
+model ClaimJob {
+  id            String    @id @default(uuid())
+  clientId      String?
+  client        Client?   @relation(fields: [clientId], references: [id])
+  providerId    String?
+  provider      Provider? @relation(fields: [providerId], references: [id])
+  reviewDecisions ClaimReviewDecision[]
+  jobType       String    // "CLAIM_VALIDATION" | "TARIFF_CHECK" | "DRUG_PRICE" | "PATHWAY_GEN"
+  status        String    @default("QUEUED") // "QUEUED" | "PRE_PROCESSING" | "PROCESSING" | "POST_PROCESSING" | "COMPLETED" | "FAILED"
+  inputPayload  Json      // Raw input JSON
+  outputResult  Json?     // Final result JSON
+  errorMessage  String?
+  metadata      Json?     // Additional metadata (timing, step logs)
+  workflowRunId String?   // Upstash Workflow run ID
+  startedAt     DateTime?
+  completedAt   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([clientId])
+  @@index([status])
+  @@index([jobType])
+  @@index([workflowRunId])
+  @@map("snp_claim_job")
+}
+
+model ClaimReviewDecision {
+  id                   String   @id @default(uuid())
+  jobId                String
+  job                  ClaimJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  clientId             String?
+  client               Client?  @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  reviewerId           String?
+  reviewer             User?    @relation(fields: [reviewerId], references: [id], onDelete: SetNull)
+  decision             String   // "APPROVE" | "APPROVE_WITH_ADJUSTMENT" | "REJECT" | "REQUEST_DOCUMENTS" | "ESCALATE_MEDICAL_ADVISOR"
+  reviewStatus         String   @default("DECIDED") // "IN_REVIEW" | "DECIDED" | "WAITING_DOCUMENTS" | "ESCALATED"
+  payableAmount        Float?
+  excessAmount         Float?
+  reasonCode           String?
+  note                 String?
+  previousReviewStatus String?
+  nextReviewStatus     String
+  hitlPacket           Json?
+  createdAt            DateTime @default(now())
+
+  @@index([jobId, createdAt])
+  @@index([clientId, createdAt])
+  @@index([reviewerId, createdAt])
+  @@index([decision])
+  @@map("snp_claim_review_decision")
+}
+
+// === MEDICAL ITEM PRICE MASTER DATA ===
+
+model MedicalItemPriceMaster {
+  id              String   @id @default(uuid())
+  itemName        String   @unique
+  itemGenericName String?
+  itemTypeCode    String?  // Source item type code: medicine, device, vaccine, supplement, herbal, etc.
+  itemTypeName    String?  // Source item type label
+  itemGroup       String?  // General item group, e.g., pharmacy or medical supply
+  marketPriceMax  Float    // Highest usable reference price for validation
+  marketPriceAvg  Float?
+  fixPrice        Float?   // Source fixed/reference price, may be unavailable or nominal
+  hetPrice        Float?   // Regulated maximum/reference retail price when available
+  maxReferencePrice Float? // Source max reference price / resolved validation ceiling
+  sources         Json     // Array of source URLs/names/metadata
+  currency        String   @default("IDR")
+  fetchedAt       DateTime @default(now())
+  expiresAt       DateTime // Reference validity end date
+  createdAt       DateTime @default(now())
+
+  @@index([itemGenericName])
+  @@index([itemTypeCode])
+  @@index([itemGroup])
+  @@map("snp_medical_item_price_master")
+}
+
+// === CLINICAL PATHWAY TEMPLATES ===
+
+model ClinicalPathway {
+  id              String   @id @default(uuid())
+  diagnosisCode   String   // Diagnosis code
+  diagnosisName   String
+  providerType    String?  // Optional payer/provider category; null means universal
+  pathwayVersion  String   @default("1.0")
+  phases          Json     // Structured pathway phases (see JSON template)
+  estimatedLos    Int?     // Length of Stay in days
+  totalEstCost    Float?
+  isActive        Boolean  @default(true)
+  generatedBy     String   @default("MANUAL") // "MANUAL" | "AI"
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([diagnosisCode])
+  @@map("snp_clinical_pathway")
+}
+
+// === SYSTEM CONFIGURATION ===
+
+model SystemConfig {
+  id              String   @id @default("GLOBAL_CONFIG")
+  aiProvider      String   @default("vercel-ai-gateway") // "vercel-ai-gateway" | "sumopod" | "custom"
+  aiGatewayUrl    String   @default("")
+  aiModel         String   @default("gpt-4o-mini")
+  aiMaxTokens     Int      @default(1500)
+  aiTemperature   Float    @default(0.7)
+  thresholdObatPct Float   @default(10.0) // Legacy config key for medication/farmalkes threshold
+  thresholdTindakanPct Float @default(10.0)
+  thresholdLosDays Int     @default(1)
+  piiRedactPatterns String[] @default(["name", "nama", "pasien", "patient", "fullname", "nik", "id", "ktp", "ssn", "identifier", "address", "alamat", "phone", "telepon", "nohp", "mobile", "email", "dob", "dateofbirth", "tanggallahir", "asuransi", "insurance", "bpjs"])
+  piiSafeContexts   String[] @default(["diagnosis", "diagnoses", "procedure", "procedures", "medication", "medications", "drug", "drugs", "facility", "hospital", "clinic", "encounter", "class", "code", "type", "genericName", "genericname", "category", "dosage"])
+  updatedAt       DateTime @updatedAt
+
+  @@map("snp_system_config")
+}
+
+// === OCR PROCESSING ===
+
+model OcrJob {
+  id              String    @id @default(uuid())
+  clientId        String?
+  client          Client?   @relation(fields: [clientId], references: [id])
+  providerId      String?
+  provider        Provider? @relation(fields: [providerId], references: [id])
+  
+  // File references
+  pdfStoragePath  String    // Supabase storage path for uploaded PDF
+  pdfUrl          String    // SnapText-accessible URL for the PDF
+  txtStoragePath  String?   // Supabase storage path for TXT ground truth
+  txtContent      String?   // Parsed TXT content (stored for scoring)
+  
+  // SnapText job tracking
+  snaptextJobId   String?   // Job ID from SnapText API
+  snaptextStatus  String    @default("PENDING") // "PENDING" | "UPLOADING" | "PROCESSING" | "COMPLETED" | "FAILED"
+  
+  // OCR results & scoring
+  ocrRawResult    Json?     // Raw OCR output from SnapText
+  ocrItems        Json?     // Parsed structured items from OCR: { items: [{ field, ocrValue, correctedValue? }] }
+  txtItems        Json?     // Parsed structured items from TXT ground truth
+  matchScore      Float?    // 0-100 matching score
+  scoringDetails  Json?     // Per-item scoring breakdown: [{ field, expected, actual, match: boolean }]
+  aiMappedPayload Json?     // Cached result of AI smart mapping (mapArbitraryJsonToClaim)
+  
+  // Lifecycle
+  status          String    @default("PENDING") // "PENDING" | "OCR_PROCESSING" | "SCORING" | "REVIEW_NEEDED" | "APPROVED" | "FORWARDED" | "FAILED"
+  claimJobId      String?   // Linked ClaimJob ID once forwarded
+  errorMessage    String?
+  reviewedByUserId String?
+  
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([clientId])
+  @@index([status])
+  @@index([claimJobId])
+  @@map("snp_ocr_job")
+}

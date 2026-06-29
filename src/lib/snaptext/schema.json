@@ -1,0 +1,155 @@
+{
+  "type": "object",
+  "properties": {
+    "amount": {
+      "type": "number",
+      "description": "Final grand total to pay. Use IDR. No Rp symbol. No dot or comma separator. Take only one final total. Ignore subtotal, deposit, benefit limit, room rate, discount, tax. If many numbers, pick one with label Grand Total, Total Invoice, Total Tagihan, Total Kuitansi, or Amount Due."
+    },
+    "provider_name": {
+      "type": "string",
+      "description": "Nama rumah sakit/klinik penerbit layanan dari header/logo. Bukan insurer/payer/TPA, dokter, pasien, perusahaan, atau departemen."
+    },
+    "member_name": {
+      "type": "string",
+      "description": "Nama pasien/anggota. Bukan dokter, payer, petugas, atau perusahaan."
+    },
+    "invoice_number": {
+      "type": "string",
+      "description": "Official invoice number. Look for Invoice No., No. Tagihan, Billing No., Receipt No., No. Kuitansi. Do NOT use RM number, Patient ID, Admission No., Visit No., policy number, card number, or medical form number. If no can read, skip."
+    },
+    "patient_identifier": {
+      "type": "string",
+      "description": "No. RM/MRN/Patient ID jika ada. Bukan invoice_number."
+    },
+    "insurance_number": {
+      "type": "string",
+      "description": "Nomor polis/peserta/kartu asuransi/BPJS jika ada."
+    },
+    "patient_birth_date": {
+      "type": "string",
+      "description": "Tanggal lahir pasien ISO yyyy-MM-dd. Jangan tebak dari umur."
+    },
+    "patient_gender": {
+      "type": "string",
+      "description": "Jenis kelamin: M atau F."
+    },
+    "encounter_type": {
+      "type": "string",
+      "description": "Jenis episode: RAWAT_INAP, RAWAT_JALAN, atau IGD."
+    },
+    "admission_date": {
+      "type": "string",
+      "description": "Tanggal mulai perawatan/kunjungan. Ambil dari Admission/Admit/Tgl Masuk/Rawat mulai/Period from. Format yyyy-MM-dd. Bukan tanggal invoice, cetak, bayar, lahir, atau service item."
+    },
+    "discharge_date": {
+      "type": "string",
+      "description": "Tanggal selesai perawatan/kunjungan. Ambil dari Discharge/Tgl Pulang/Tgl Keluar/Rawat s.d./Period to. Format yyyy-MM-dd. Rawat jalan satu tanggal: samakan dengan admission_date. Bukan tanggal invoice/cetak/bayar."
+    },
+    "documents": {
+      "type": "array",
+      "description": "Dokumen pendukung yang terlihat di PDF. Scan semua halaman. Type hanya: LMA, KTP, KARTU ASURANSI, SK KAMAR, FORM KRONOLOGIS KECELAKAAN, SURAT PERNYATAAN RAWAT INAP.",
+      "items": {
+        "type": "object",
+        "description": "Satu dokumen pendukung dari halaman/kartu/form/surat yang terlihat. Jangan buat dari info invoice saja.",
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "Type standar dokumen. Alias: LMA/Lembar Medis Awal; KTP/e-KTP/NIK; Kartu Asuransi/Member Card/BPJS; SK Kamar; FK/FMK; SPRI."
+          },
+          "date": {
+            "type": "string",
+            "description": "Tanggal dokumen ISO 8601; jika tidak ada gunakan timestamp OCR."
+          },
+          "conclusion": {
+            "type": "string",
+            "description": "Kesimpulan singkat. Pakai standar sesuai type, mis. KTP: Identitas sesuai KTP."
+          }
+        }
+      }
+    },
+    "diagnoses": {
+      "type": "array",
+      "description": "STRICT: Hanya ambil PRIMARY dan SECONDARY diagnosis. MAKSIMAL 3 DIAGNOSA. DILARANG KERAS mengambil diagnosa dari Resume Medis (Discharge Summary), keluhan pasien, atau riwayat penyakit. Hanya ambil dari kolom/label diagnosis final/utama/sekunder.",
+      "items": {
+        "type": "object",
+        "description": "Satu diagnosis final bersih.",
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Kode ICD-10 jika tertulis eksplisit. Kosongkan jika tidak ada."
+          },
+          "name": {
+            "type": "string",
+            "description": "Nama diagnosis klinis persis seperti tertulis. Bukan keluhan, bukan deskripsi panjang resume medis, bukan obat/tindakan."
+          },
+          "type": {
+            "type": "string",
+            "description": "Hanya PRIMARY atau SECONDARY."
+          },
+          "sequence": {
+            "type": "number",
+            "description": "Urutan diagnosis (1, 2, atau 3). PRIMARY wajib bernilai 1."
+          }
+        }
+      }
+    },
+    "line_items": {
+      "type": "array",
+      "description": "STRICT INVOICE ONLY: Hanya ambil rincian dari tabel tagihan final/billing breakdown. DILARANG KERAS mengambil dari resep, hasil lab, ringkasan medis, atau teks klinis.",
+      "items": {
+        "type": "object",
+        "description": "Satu baris tagihan konkret (ada harga/qty). Abaikan subtotal, grand total, diskon, atau limit benefit asuransi.",
+        "properties": {
+          "item_type": {
+            "type": "string",
+            "description": "PROCEDURE, MEDICATION, atau MEDICAL_SUPPLY."
+          },
+          "code": {
+            "type": "string",
+            "description": "Kode item/service eksplisit. Omit jika tidak ada."
+          },
+          "name": {
+            "type": "string",
+            "description": "Nama item persis seperti tertulis di baris tabel invoice. Jangan menebak, mengubah, atau menyusun dari tempat lain."
+          },
+          "category": {
+            "type": "string",
+            "description": "Kategori/departemen dari invoice detail jika eksplisit. Bukan header halaman."
+          },
+          "generic_name": {
+            "type": "string",
+            "description": "Nama generik obat jika eksplisit dan berbeda dari name."
+          },
+          "dosage": {
+            "type": "string",
+            "description": "Kekuatan/sediaan obat/produk jika ada."
+          },
+          "quantity": {
+            "type": "number",
+            "description": "Jumlah dari tabel tagihan. Jika tidak ada, isi 1. Dilarang hitung manual dari resep."
+          },
+          "unit_price": {
+            "type": "number",
+            "description": "Harga satuan dari tabel tagihan. Boleh kosong jika hanya ada total."
+          },
+          "total_price": {
+            "type": "number",
+            "description": "Total harga dari baris tagihan. Wajib > 0. Dilarang isi dengan subtotal/grand total."
+          },
+          "frequency": {
+            "type": "string",
+            "description": "Aturan pakai obat dari tabel invoice jika ada (contoh 3x1)."
+          },
+          "duration": {
+            "type": "string",
+            "description": "Durasi penggunaan dari tabel invoice jika ada (contoh 5 hari)."
+          },
+          "service_date": {
+            "type": "string",
+            "description": "Tanggal layanan yyyy-MM-dd jika ada."
+          }
+        }
+      }
+    }
+  }
+}
